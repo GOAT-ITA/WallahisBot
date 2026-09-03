@@ -1,0 +1,17 @@
+{
+  "name": "wallahisbot",
+  "version": "1.0.0",
+  "description": "Bot Discord che traccia i 'Wallahi' dei membri del server",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "deploy": "node deploy-commands.js"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.38.3",
+    "canvas": "^3.2.3",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5"
+  }
+}
