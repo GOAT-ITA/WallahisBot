@@ -2,13 +2,15 @@ require('dotenv').config();
 const http = require('http');
 const path = require('path');
 const {
+  AttachmentBuilder,
   Client,
+  EmbedBuilder,
   GatewayIntentBits,
   Partials,
-  EmbedBuilder,
-  AttachmentBuilder,
 } = require('discord.js');
 const { generateWallahiImage } = require('./imageGen');
+const { countLoseKeywords } = require('./wallahiText');
+const { RARITIES, WALLAHIS, getCollectionBoost } = require('./wallahiCatalog');
 const {
   getWallahi,
   setWallahi,
@@ -16,8 +18,23 @@ const {
   getXp,
   setXp,
   getGuildLeaderboard,
-  wipeGuildData,
+  getCollection,
+  getBonusBoost,
+  setBonusBoost,
+  getMinigameConfig,
 } = require('./storage');
+const {
+  initializeMinigames,
+  initializeGuildMinigame,
+  setChannel,
+  changeEnabled,
+  spawnWallahi,
+  handleCatch,
+} = require('./minigame');
+
+const OWNER_DISCORD_ID = process.env.OWNER_DISCORD_ID;
+const WALLAHI_ROLE_NAME = 'Wallahi';
+const MAX_WALLAHI_LEVEL = 100;
 
 const client = new Client({
   intents: [
@@ -29,34 +46,20 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel],
 });
 
-// Small HTTP endpoint for Render Web Service keep-alive checks.
 const PORT = process.env.PORT || 3000;
 http
   .createServer((req, res) => {
     if (req.url === '/' || req.url === '/health') {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('WallahisBot is alive');
+      const ready = client.isReady();
+      res.writeHead(ready ? 200 : 503, { 'Content-Type': 'text/plain' });
+      res.end(ready ? 'WallahisBot is alive and connected' : 'WallahisBot is starting');
       return;
     }
-
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Not found');
   })
-  .listen(PORT, () => {
-    console.log(`Keep-alive web server listening on port ${PORT}`);
-  });
+  .listen(PORT, () => console.log(`Keep-alive web server listening on port ${PORT}`));
 
-// Wallahi levels and XP are now persisted in Redis (see storage.js).
-// Only short-lived chat activity (for spam detection) stays in memory below,
-// since it doesn't need to survive a restart.
-
-// ==========================================
-// XP / LEVEL PROGRESSION SYSTEM
-// ==========================================
-
-const MAX_WALLAHI_LEVEL = 100;
-
-// XP required to reach the next wallahi level.
 function xpRequiredForLevel(level) {
   if (level <= 25) return level * 5;
   if (level <= 50) return 125 + (level - 25) * 10;
@@ -64,12 +67,7 @@ function xpRequiredForLevel(level) {
   return 750 + (level - 75) * 20;
 }
 
-// ==========================================
-// CHAT ACTIVITY TRACKING (spam detection, per user per guild)
-// Structure: activityData["guildId"]["userId"] = { timestamps, lastContent, spamUntil }
-// ==========================================
 const activityData = {};
-
 function getActivity(guildId, userId) {
   if (!activityData[guildId]) activityData[guildId] = {};
   if (!activityData[guildId][userId]) {
@@ -78,434 +76,395 @@ function getActivity(guildId, userId) {
   return activityData[guildId][userId];
 }
 
-const XP_MIN_WORD_COUNT = 2; // messages with fewer words earn no xp
+const XP_MIN_WORD_COUNT = 2;
 const XP_BASE_AMOUNT = 5;
-const XP_PER_CHARS = 5; // +1 xp every 5 characters
+const XP_PER_CHARS = 5;
 const XP_MAX_PER_MESSAGE = 18;
-
-const SPAM_WINDOW_MS = 5000; // look at the last 5 seconds
-const SPAM_MESSAGE_THRESHOLD = 5; // 5+ messages in that window counts as spam
-const SPAM_COOLDOWN_MS = 30000; // no xp for 30 seconds after spam is detected
+const SPAM_WINDOW_MS = 5000;
+const SPAM_MESSAGE_THRESHOLD = 5;
+const SPAM_COOLDOWN_MS = 30000;
 
 function calculateMessageXp(length) {
-  const raw = XP_BASE_AMOUNT + Math.floor(length / XP_PER_CHARS);
-  return Math.min(raw, XP_MAX_PER_MESSAGE);
+  return Math.min(XP_BASE_AMOUNT + Math.floor(length / XP_PER_CHARS), XP_MAX_PER_MESSAGE);
 }
 
 function countWords(content) {
-  const words = content.trim().match(/\S+/g);
-  return words ? words.length : 0;
+  return content.trim().match(/\S+/g)?.length || 0;
 }
 
-// ==========================================
-// KEYWORDS
-// ==========================================
-// - matches even when glued inside other text (no word boundaries required)
-// - collapses stretched-out repeated letters (e.g. "wallahiiiiiis")
-// - catches scrambled letter order (e.g. "WallHai") via an anagram check on a sliding window
-function collapseRepeatedLetters(str) {
-  return str.replace(/(.)\1+/g, '$1');
-}
-
-function sortLetters(str) {
-  return str.split('').sort().join('');
-}
-
-const LOSE_KEYWORD_DEFS = ['wallah', 'wallahi', 'wallahis'].map((word) => {
-  const collapsed = collapseRepeatedLetters(word);
-  return { length: collapsed.length, sorted: sortLetters(collapsed) };
-});
-
-function containsLoseKeyword(content) {
-  const words = content.toLowerCase().match(/[a-z]+/g);
-  if (!words) return false;
-
-  for (const rawWord of words) {
-    const letters = collapseRepeatedLetters(rawWord);
-
-    for (const { length, sorted } of LOSE_KEYWORD_DEFS) {
-      if (letters.length < length) continue;
-      for (let i = 0; i <= letters.length - length; i++) {
-        const window = letters.slice(i, i + length);
-        if (sortLetters(window) === sorted) return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-// Static reference images (sent as-is, no dynamic number overlay)
 const IMAGE_ZERO = path.join(__dirname, 'assets', 'wallahi_0_red.jpg');
 const IMAGE_SIXTY_SEVEN = path.join(__dirname, 'assets', 'wallahi_67_blue.jpg');
 const IMAGE_HUNDRED = path.join(__dirname, 'assets', 'wallahi_100_gold.jpg');
 
-const WALLAHI_ROLE_NAME = 'Wallahi';
-
-/**
- * Builds the right attachment for a given wallahi count:
- * - exactly 0 -> static red image
- * - exactly 67 -> static blue milestone image
- * - exactly 100 -> static gold image
- * - anything else -> dynamically generated template with the number overlaid
- */
 async function buildWallahiAttachment(count) {
-  if (count === 0) {
-    return new AttachmentBuilder(IMAGE_ZERO, { name: 'wallahi.jpg' });
-  }
-  if (count === 67) {
-    return new AttachmentBuilder(IMAGE_SIXTY_SEVEN, { name: 'wallahi.jpg' });
-  }
-  if (count === 100) {
-    return new AttachmentBuilder(IMAGE_HUNDRED, { name: 'wallahi.jpg' });
-  }
-  const buffer = await generateWallahiImage(count);
-  return new AttachmentBuilder(buffer, { name: 'wallahi.jpg' });
+  if (count === 0) return new AttachmentBuilder(IMAGE_ZERO, { name: 'wallahi.jpg' });
+  if (count === 67) return new AttachmentBuilder(IMAGE_SIXTY_SEVEN, { name: 'wallahi.jpg' });
+  if (count === 100) return new AttachmentBuilder(IMAGE_HUNDRED, { name: 'wallahi.jpg' });
+  return new AttachmentBuilder(await generateWallahiImage(count), { name: 'wallahi.jpg' });
 }
 
-// ==========================================
-// READY
-// ==========================================
-client.once('clientReady', () => {
-  console.log(`✅ Bot online come ${client.user.tag}`);
+function isOwner(interaction) {
+  return Boolean(OWNER_DISCORD_ID) && interaction.user.id === OWNER_DISCORD_ID;
+}
+
+function hasWallahiRole(interaction) {
+  return interaction.member?.roles?.cache?.some((role) => role.name === WALLAHI_ROLE_NAME);
+}
+
+function formatNumber(value) {
+  return Number(value.toFixed(2)).toString();
+}
+
+async function denyUnauthorized(interaction) {
+  await interaction.reply({ content: 'You are not authorized to use this command.', ephemeral: true });
+}
+
+client.once('clientReady', async () => {
+  console.log(`Bot online as ${client.user.tag}`);
+  if (!OWNER_DISCORD_ID) console.warn('OWNER_DISCORD_ID is not configured.');
+  try {
+    await initializeMinigames(client);
+  } catch (error) {
+    console.error('Failed to initialize CATCH WALLAHIS:', error);
+  }
 });
 
-// ==========================================
-// NEW MEMBER -> initialize to 0 if not already set
-// ==========================================
 client.on('guildMemberAdd', async (member) => {
   try {
     await ensureWallahiExists(member.guild.id, member.id);
-  } catch (err) {
-    console.error('Failed to initialize wallahi for new member:', err);
+  } catch (error) {
+    console.error('Failed to initialize Wallahi data for a new member:', error);
   }
 });
 
-// ==========================================
-// BOT REMOVED FROM A SERVER -> wipe that server's data
-// ==========================================
-client.on('guildDelete', async (guild) => {
+client.on('guildCreate', async (guild) => {
   try {
-    await wipeGuildData(guild.id);
-    console.log(`Wiped wallahi data for guild ${guild.id} (${guild.name || 'unknown'})`);
-  } catch (err) {
-    console.error('Failed to wipe data after leaving guild:', err);
+    await initializeGuildMinigame(client, guild);
+  } catch (error) {
+    console.error('Failed to restore CATCH WALLAHIS after joining a server:', error);
   }
 });
 
-// ==========================================
-// MESSAGES -> XP progression + losing wallahis
-// ==========================================
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  if (!message.guild) return; // ignore DMs
+  if (message.author.bot || !message.guild) return;
+  try {
+    const content = message.content;
+    const guildId = message.guild.id;
+    const userId = message.author.id;
+    const lossesRequested = countLoseKeywords(content);
 
-  const content = message.content;
-  const guildId = message.guild.id;
-  const userId = message.author.id;
-
-  // Saying "wallah/wallahi/wallahis" makes you lose a wallahi and resets that level's xp progress
-  if (containsLoseKeyword(content)) {
-    const current = await getWallahi(guildId, userId);
-    if (current === 0) {
-      // already at 0, do nothing
+    if (lossesRequested > 0) {
+      const current = await getWallahi(guildId, userId);
+      if (current === 0) return;
+      const lost = Math.min(current, lossesRequested);
+      const updated = await setWallahi(guildId, userId, current - lost);
+      await setXp(guildId, userId, 0);
+      const attachment = await buildWallahiAttachment(updated);
+      await message.reply({
+        content: `${message.author} YOU LOST ${lost} WALLAHI${lost === 1 ? '' : 'S'} xd (${updated})`,
+        files: [attachment],
+      });
       return;
     }
-    const updated = await setWallahi(guildId, userId, current - 1);
-    await setXp(guildId, userId, 0);
-    const attachment = await buildWallahiAttachment(updated);
-    await message.reply({
-      content: `${message.author} YOU LOST A WALLAHI xd (${updated})`,
-      files: [attachment],
-    });
-    return;
-  }
 
-  // Otherwise, this message might earn xp towards the next wallahi level
-  const activity = getActivity(guildId, userId);
-  const now = Date.now();
-
-  // Spam detection: too many messages in a short window triggers a temporary xp cooldown
-  activity.timestamps = activity.timestamps.filter((t) => now - t < SPAM_WINDOW_MS);
-  activity.timestamps.push(now);
-  if (activity.timestamps.length >= SPAM_MESSAGE_THRESHOLD) {
-    activity.spamUntil = now + SPAM_COOLDOWN_MS;
-  }
-
-  const trimmedContent = content.trim();
-  const isSpamCoolingDown = now < activity.spamUntil;
-  const hasTooFewWords = countWords(trimmedContent) < XP_MIN_WORD_COUNT;
-  const isRepeatedMessage = trimmedContent === activity.lastContent;
-
-  activity.lastContent = trimmedContent;
-
-  if (isSpamCoolingDown || hasTooFewWords || isRepeatedMessage) return;
-
-  const earnedXp = calculateMessageXp(trimmedContent.length);
-  if (earnedXp <= 0) return;
-
-  let level = await getWallahi(guildId, userId);
-  if (level >= MAX_WALLAHI_LEVEL) {
-    await setXp(guildId, userId, 0);
-    return;
-  }
-
-  let xp = (await getXp(guildId, userId)) + earnedXp;
-  let requiredForNext = xpRequiredForLevel(level + 1);
-  let leveledUp = false;
-
-  while (xp >= requiredForNext && level < MAX_WALLAHI_LEVEL) {
-    xp -= requiredForNext;
-    level += 1;
-    leveledUp = true;
-    if (level < MAX_WALLAHI_LEVEL) {
-      requiredForNext = xpRequiredForLevel(level + 1);
+    const activity = getActivity(guildId, userId);
+    const now = Date.now();
+    activity.timestamps = activity.timestamps.filter((timestamp) => now - timestamp < SPAM_WINDOW_MS);
+    activity.timestamps.push(now);
+    if (activity.timestamps.length >= SPAM_MESSAGE_THRESHOLD) {
+      activity.spamUntil = now + SPAM_COOLDOWN_MS;
     }
-  }
 
-  if (level >= MAX_WALLAHI_LEVEL) {
-    level = MAX_WALLAHI_LEVEL;
-    xp = 0;
-  }
+    const trimmedContent = content.trim();
+    const repeated = trimmedContent === activity.lastContent;
+    activity.lastContent = trimmedContent;
+    if (
+      now < activity.spamUntil ||
+      countWords(trimmedContent) < XP_MIN_WORD_COUNT ||
+      repeated
+    ) {
+      return;
+    }
 
-  await setXp(guildId, userId, xp);
+    let level = await getWallahi(guildId, userId);
+    if (level >= MAX_WALLAHI_LEVEL) {
+      await setXp(guildId, userId, 0);
+      return;
+    }
 
-  if (leveledUp) {
-    await setWallahi(guildId, userId, level);
-    const attachment = await buildWallahiAttachment(level);
-    await message.reply({
-      content: `${message.author} YOU GAINED A WALLAHI (${level})`,
-      files: [attachment],
-    });
+    const baseXp = calculateMessageXp(trimmedContent.length);
+    const collection = await getCollection(guildId, userId);
+    const collectionBoost = getCollectionBoost(collection);
+    const bonusBoost = await getBonusBoost(guildId, userId);
+    const earnedXp = baseXp * (1 + (collectionBoost + bonusBoost) / 100);
+    let xp = (await getXp(guildId, userId)) + earnedXp;
+    let requiredForNext = xpRequiredForLevel(level + 1);
+    let leveledUp = false;
+
+    while (xp >= requiredForNext && level < MAX_WALLAHI_LEVEL) {
+      xp -= requiredForNext;
+      level += 1;
+      leveledUp = true;
+      if (level < MAX_WALLAHI_LEVEL) requiredForNext = xpRequiredForLevel(level + 1);
+    }
+
+    if (level >= MAX_WALLAHI_LEVEL) {
+      level = MAX_WALLAHI_LEVEL;
+      xp = 0;
+    }
+    await setXp(guildId, userId, xp);
+
+    if (leveledUp) {
+      await setWallahi(guildId, userId, level);
+      await message.reply({
+        content: `${message.author} YOU GAINED A WALLAHI (${level})`,
+        files: [await buildWallahiAttachment(level)],
+      });
+    }
+  } catch (error) {
+    console.error('Failed to process a message:', error);
   }
 });
 
-// ==========================================
-// SLASH COMMANDS
-// ==========================================
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  if (!interaction.guild) return;
-
+async function handleCommand(interaction) {
   const { commandName } = interaction;
+  const guildId = interaction.guild.id;
 
-  // Controllo ruolo "Wallahi" per i comandi admin
-  const hasWallahiRole = interaction.member.roles.cache.some(
-    (role) => role.name === WALLAHI_ROLE_NAME
-  );
+  if (['give', 'remove', 'set', 'add'].includes(commandName) && !isOwner(interaction)) {
+    return denyUnauthorized(interaction);
+  }
 
   if (commandName === 'give') {
-    if (!hasWallahiRole) {
-      return interaction.reply({
-        content: `You need the ${WALLAHI_ROLE_NAME} role to use this command.`,
-        ephemeral: true,
-      });
-    }
-
-    const targetUser = interaction.options.getUser('user');
+    const target = interaction.options.getUser('user');
     const amount = interaction.options.getInteger('quantity');
-
-    const current = await getWallahi(interaction.guild.id, targetUser.id);
-    if (current >= MAX_WALLAHI_LEVEL) {
-      return interaction.reply({
-        content: `${targetUser} is already at max level.`,
-        ephemeral: true,
-      });
+    if (amount < 1) {
+      return interaction.reply({ content: 'Quantity must be at least 1.', ephemeral: true });
     }
-
+    const current = await getWallahi(guildId, target.id);
     if (current + amount > MAX_WALLAHI_LEVEL) {
       return interaction.reply({
-        content: `You can't give ${amount} wallahis to ${targetUser}. The max level is ${MAX_WALLAHI_LEVEL}.`,
+        content: `You can't give ${amount} Wallahis to ${target}. The max level is ${MAX_WALLAHI_LEVEL}.`,
         ephemeral: true,
       });
     }
-
-    const updated = await setWallahi(interaction.guild.id, targetUser.id, current + amount);
-
-    return interaction.reply({
-      content: `${targetUser} has now ${updated} wallahis!`,
-    });
+    const updated = await setWallahi(guildId, target.id, current + amount);
+    return interaction.reply({ content: `${target} now has ${updated} Wallahis!` });
   }
 
   if (commandName === 'remove') {
-    if (!hasWallahiRole) {
-      return interaction.reply({
-        content: `You need the ${WALLAHI_ROLE_NAME} role to use this command.`,
-        ephemeral: true,
-      });
-    }
-
-    const targetUser = interaction.options.getUser('user');
-    await setWallahi(interaction.guild.id, targetUser.id, 0);
-    await setXp(interaction.guild.id, targetUser.id, 0);
-
-    return interaction.reply({
-      content: `${targetUser} has now 0 wallahis!`,
-    });
+    const target = interaction.options.getUser('user');
+    await setWallahi(guildId, target.id, 0);
+    await setXp(guildId, target.id, 0);
+    return interaction.reply({ content: `${target} now has 0 Wallahis!` });
   }
 
   if (commandName === 'xp') {
-    const level = await getWallahi(interaction.guild.id, interaction.user.id);
+    const level = await getWallahi(guildId, interaction.user.id);
     if (level >= MAX_WALLAHI_LEVEL) {
-      await setXp(interaction.guild.id, interaction.user.id, 0);
-      return interaction.reply({
-        content: `${interaction.user}, you're at max level.`,
-      });
+      await setXp(guildId, interaction.user.id, 0);
+      return interaction.reply({ content: `${interaction.user}, you're at max level.` });
     }
-
-    const xp = await getXp(interaction.guild.id, interaction.user.id);
-    const required = xpRequiredForLevel(level + 1);
-
+    const xp = await getXp(guildId, interaction.user.id);
     return interaction.reply({
-      content: `You're at wallahi level ${level}, with ${xp}/${required} xp until the next one.`,
+      content: `You're at Wallahi level ${level}, with ${formatNumber(xp)}/${xpRequiredForLevel(level + 1)} XP until the next one.`,
     });
   }
 
   if (commandName === 'wallahis') {
-    const subcommandName = interaction.options.getSubcommand();
-
-    if (subcommandName === 'left') {
-      const current = await getWallahi(interaction.guild.id, interaction.user.id);
-      const attachment = await buildWallahiAttachment(current);
-
-      return interaction.reply({
-        content: `${interaction.user} YOU HAVE ${current} WALLAHIS LEFT.`,
-        files: [attachment],
-      });
-    }
+    const current = await getWallahi(guildId, interaction.user.id);
+    return interaction.reply({
+      content: `${interaction.user} YOU HAVE ${current} WALLAHIS LEFT.`,
+      files: [await buildWallahiAttachment(current)],
+    });
   }
 
   if (commandName === 'set') {
-    const subcommandName = interaction.options.getSubcommand();
-
-    if (subcommandName === 'xp') {
-      if (!hasWallahiRole) {
-        return interaction.reply({
-          content: `You need the ${WALLAHI_ROLE_NAME} role to use this command.`,
-          ephemeral: true,
-        });
-      }
-
-      const targetUser = interaction.options.getUser('user');
+    const subcommand = interaction.options.getSubcommand();
+    const target = interaction.options.getUser('user');
+    if (subcommand === 'level') {
       const amount = interaction.options.getInteger('amount');
-      const currentLevel = await getWallahi(interaction.guild.id, targetUser.id);
-      if (currentLevel >= MAX_WALLAHI_LEVEL) {
-        await setXp(interaction.guild.id, targetUser.id, 0);
-        return interaction.reply({
-          content: `${targetUser} is already at max level.`,
-          ephemeral: true,
-        });
-      }
-
-      const required = xpRequiredForLevel(currentLevel + 1);
-
-      if (amount > required) {
-        return interaction.reply({
-          content: `You can't set ${targetUser}'s xp to ${amount}/${required}. The maximum for wallahi level ${currentLevel} is ${required}.`,
-          ephemeral: true,
-        });
-      }
-
-      if (amount === required) {
-        const newLevel = await setWallahi(
-          interaction.guild.id,
-          targetUser.id,
-          Math.min(currentLevel + 1, MAX_WALLAHI_LEVEL)
-        );
-        await setXp(interaction.guild.id, targetUser.id, 0);
-        const attachment = await buildWallahiAttachment(newLevel);
-
-        await interaction.reply({
-          content: `${targetUser}, you're now at ${required}/${required} xp at wallahi ${currentLevel}.`,
-        });
-
-        return interaction.followUp({
-          content: `${targetUser} YOU GAINED A WALLAHI (${newLevel})`,
-          files: [attachment],
-        });
-      }
-
-      const updatedXp = await setXp(interaction.guild.id, targetUser.id, amount);
-
-      return interaction.reply({
-        content: `${targetUser}, you're now at ${updatedXp}/${required} xp at wallahi ${currentLevel}.`,
-      });
+      const level = await setWallahi(guildId, target.id, amount);
+      await setXp(guildId, target.id, 0);
+      return interaction.reply({ content: `${target} is now at Wallahi level ${level}.` });
     }
 
-    if (subcommandName === 'level') {
-      if (!hasWallahiRole) {
-        return interaction.reply({
-          content: `You need the ${WALLAHI_ROLE_NAME} role to use this command.`,
-          ephemeral: true,
-        });
-      }
-
-      const targetUser = interaction.options.getUser('user');
-      const amount = interaction.options.getInteger('amount');
-      if (amount > MAX_WALLAHI_LEVEL) {
-        return interaction.reply({
-          content: `You can't set ${targetUser}'s level to ${amount}. The max level is ${MAX_WALLAHI_LEVEL}.`,
-          ephemeral: true,
-        });
-      }
-
-      const updatedLevel = await setWallahi(interaction.guild.id, targetUser.id, amount);
-      await setXp(interaction.guild.id, targetUser.id, 0);
-      if (updatedLevel >= MAX_WALLAHI_LEVEL) {
-        return interaction.reply({
-          content: `${targetUser}, you're now at max level.`,
-        });
-      }
-
-      const required = xpRequiredForLevel(updatedLevel + 1);
-
+    const amount = interaction.options.getNumber('amount');
+    const level = await getWallahi(guildId, target.id);
+    if (level >= MAX_WALLAHI_LEVEL) {
+      await setXp(guildId, target.id, 0);
+      return interaction.reply({ content: `${target} is already at max level.`, ephemeral: true });
+    }
+    const required = xpRequiredForLevel(level + 1);
+    if (amount > required) {
       return interaction.reply({
-        content: `${targetUser}, you're now at level ${updatedLevel} with 0/${required} xp.`,
+        content: `You can't set ${target}'s XP to ${formatNumber(amount)}/${required}.`,
+        ephemeral: true,
       });
     }
+    if (amount === required) {
+      const newLevel = await setWallahi(guildId, target.id, level + 1);
+      await setXp(guildId, target.id, 0);
+      await interaction.reply({ content: `${target} reached ${required}/${required} XP.` });
+      return interaction.followUp({
+        content: `${target} YOU GAINED A WALLAHI (${newLevel})`,
+        files: [await buildWallahiAttachment(newLevel)],
+      });
+    }
+    await setXp(guildId, target.id, amount);
+    return interaction.reply({
+      content: `${target} now has ${formatNumber(amount)}/${required} XP at Wallahi level ${level}.`,
+    });
+  }
+
+  if (commandName === 'add') {
+    const target = interaction.options.getUser('user');
+    const amount = interaction.options.getNumber('amount');
+    const updated = await setBonusBoost(guildId, target.id, amount);
+    return interaction.reply({
+      content: updated === 0
+        ? `The additional XP boost was removed from ${target}.`
+        : `${target} now has an additional permanent +${formatNumber(updated)}% XP boost.`,
+    });
   }
 
   if (commandName === 'leaderboard') {
-    const entries = (await getGuildLeaderboard(interaction.guild.id))
-      .sort((a, b) => b[1] - a[1]) // ordine fisso, decrescente
-      .slice(0, 5);
+    const entries = (await getGuildLeaderboard(guildId)).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    if (entries.length === 0) return interaction.reply({ content: 'No one has earned any Wallahis yet.' });
+    const lines = await Promise.all(
+      entries.map(async ([userId, value], index) => {
+        const member = await interaction.guild.members.fetch(userId).catch(() => null);
+        return `${index + 1}. ${member?.displayName || `Unknown user (${userId})`} — ${value} Wallahis`;
+      })
+    );
+    return interaction.reply({
+      embeds: [new EmbedBuilder().setTitle('Wallahis Leaderboard').setDescription(lines.join('\n')).setColor(0xf1c40f)],
+    });
+  }
 
-    if (entries.length === 0) {
+  if (commandName === 'collection') {
+    const target = interaction.options.getUser('user') || interaction.user;
+    const collection = await getCollection(guildId, target.id);
+    const owned = new Set(collection);
+    const collectionBoost = getCollectionBoost(collection);
+    const bonusBoost = await getBonusBoost(guildId, target.id);
+    const lines = WALLAHIS.map((wallahi) => {
+      const rarity = RARITIES[wallahi.rarity];
+      return `${owned.has(wallahi.id) ? '✅' : '⬛'} **${wallahi.name}** — ${rarity.name} (+${wallahi.boostPercent}%)`;
+    });
+    const embed = new EmbedBuilder()
+      .setTitle(`${target.username}'s CATCH WALLAHIS Collection`)
+      .setDescription(lines.join('\n'))
+      .addFields(
+        { name: 'Collected', value: `${collection.length}/${WALLAHIS.length}`, inline: true },
+        { name: 'Collection Boost', value: `+${formatNumber(collectionBoost)}%`, inline: true },
+        { name: 'Additional Boost', value: `+${formatNumber(bonusBoost)}%`, inline: true },
+        { name: 'Total XP Boost', value: `+${formatNumber(collectionBoost + bonusBoost)}%` }
+      )
+      .setColor(0xf1c40f);
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  if (commandName === 'minigame') {
+    const subcommand = interaction.options.getSubcommand();
+    if (subcommand === 'spawn') {
+      if (!isOwner(interaction)) return denyUnauthorized(interaction);
+      await interaction.deferReply({ ephemeral: true });
+      const result = await spawnWallahi(client, interaction.guild, {
+        forced: true,
+        rarity: interaction.options.getString('rarity'),
+        wallahiId: interaction.options.getString('wallahi'),
+      });
+      return interaction.editReply(
+        result.error ? result.error : `${result.wallahi.name} was spawned without an @everyone mention.`
+      );
+    }
+
+    if (!hasWallahiRole(interaction)) {
       return interaction.reply({
-        content: 'No one has earned any wallahis in this server yet.',
+        content: `You need the ${WALLAHI_ROLE_NAME} role to use this command.`,
+        ephemeral: true,
       });
     }
 
-    const lines = await Promise.all(
-      entries.map(async ([userId, value], index) => {
-        let displayName;
-        try {
-          const member = await interaction.guild.members.fetch(userId);
-          displayName = member.displayName;
-        } catch {
-          displayName = `Unknown user (${userId})`;
-        }
-        return `${index + 1}. ${displayName} — ${value} wallahis`;
-      })
-    );
+    if (subcommand === 'channel') {
+      const channel = interaction.options.getChannel('channel');
+      const result = await setChannel(client, interaction.guild, channel);
+      return interaction.reply({
+        content: result.error
+          ? result.error
+          : `CATCH WALLAHIS will now spawn in ${channel}.${result.config.enabled ? ' The minigame is active.' : ' The minigame remains disabled.'}`,
+        ephemeral: Boolean(result.error),
+      });
+    }
+    if (subcommand === 'active') {
+      const config = await changeEnabled(client, guildId, true);
+      return interaction.reply({
+        content: config
+          ? 'CATCH WALLAHIS is now active.'
+          : 'Set a spawn channel before activating the minigame.',
+        ephemeral: !config,
+      });
+    }
+    if (subcommand === 'disable') {
+      const config = await changeEnabled(client, guildId, false);
+      return interaction.reply({
+        content: config
+          ? 'CATCH WALLAHIS is now disabled. Collections and XP boosts were not changed.'
+          : 'No minigame channel has been configured.',
+        ephemeral: !config,
+      });
+    }
+    if (subcommand === 'status') {
+      const config = await getMinigameConfig(guildId);
+      if (!config?.channelId) {
+        return interaction.reply({ content: 'CATCH WALLAHIS is disabled and has no channel.', ephemeral: true });
+      }
+      const nextSpawn = config.enabled && config.nextSpawnAt
+        ? `<t:${Math.floor(config.nextSpawnAt / 1000)}:R>`
+        : 'Not scheduled';
+      return interaction.reply({
+        content: `Status: **${config.enabled ? 'Active' : 'Disabled'}**\nChannel: <#${config.channelId}>\nNext spawn: ${nextSpawn}`,
+        ephemeral: true,
+      });
+    }
+  }
+}
 
-    const embed = new EmbedBuilder()
-      .setTitle('Wallahis Leaderboard')
-      .setDescription(lines.join('\n'))
-      .setColor(0xf1c40f);
-
-    return interaction.reply({ embeds: [embed] });
+client.on('interactionCreate', async (interaction) => {
+  if (interaction.isAutocomplete()) {
+    if (interaction.commandName !== 'minigame') return;
+    const focused = interaction.options.getFocused(true);
+    if (focused.name !== 'wallahi') return;
+    const selectedRarity = interaction.options.getString('rarity');
+    const query = focused.value.toLowerCase();
+    const choices = WALLAHIS.filter(
+      (wallahi) =>
+        (!selectedRarity || wallahi.rarity === selectedRarity) &&
+        wallahi.name.toLowerCase().includes(query)
+    )
+      .slice(0, 25)
+      .map((wallahi) => ({ name: wallahi.name, value: wallahi.id }));
+    return interaction.respond(choices).catch((error) => {
+      console.error('Failed to provide Wallahi autocomplete:', error);
+    });
+  }
+  if (interaction.isButton() && interaction.customId.startsWith('catch_wallahi:')) {
+    return handleCatch(interaction);
+  }
+  if (!interaction.isChatInputCommand() || !interaction.guild) return;
+  try {
+    await handleCommand(interaction);
+  } catch (error) {
+    console.error('Failed to process an interaction:', error);
+    const response = { content: 'Something went wrong. Please try again.', ephemeral: true };
+    if (interaction.deferred || interaction.replied) await interaction.followUp(response).catch(() => {});
+    else await interaction.reply(response).catch(() => {});
   }
 });
 
-client.login(process.env.DISCORD_TOKEN).catch((err) => {
-  console.error('Failed to log in to Discord:', err);
+client.login(process.env.DISCORD_TOKEN).catch((error) => {
+  console.error('Failed to log in to Discord:', error);
 });
 
-client.on('error', (err) => {
-  console.error('Discord client error:', err);
-});
-
-process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled promise rejection:', reason);
-});
+client.on('error', (error) => console.error('Discord client error:', error));
+process.on('unhandledRejection', (reason) => console.error('Unhandled promise rejection:', reason));
