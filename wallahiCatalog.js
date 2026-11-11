@@ -11,9 +11,13 @@ const RARITIES = {
 
 const WALLAHIS = [
   ['doritos_wallahi', 'Doritos Wallahi', 'common', 1, 'doritos_wallahi.jpg'],
+  ['drip_wallahi', 'Drip Wallahi', 'common', 1, 'drip_wallahi.jpg'],
+  ['handicapped_wallahi', 'Handicapped Wallahi', 'common', 1, 'handicapped_wallahi.jpg'],
   ['mistreated_wallahi', 'Mistreated Wallahi', 'rare', 2, 'mistreated_wallahi.jpg'],
+  ['gustavo_wallahi', 'Gustavo Wallahi', 'rare', 2, 'gustavo_wallahi.jpg'],
   ['little_wallahi', 'Little Wallahi', 'epic', 3, 'little_wallahi.png'],
   ['chill_wallahi', 'Chill Wallahi', 'legendary', 5, 'chill_wallahi.png'],
+  ['hound_wallahi', 'Hound Wallahi', 'legendary', 5, 'hound_wallahi.png'],
   ['miracle_wallahi', 'Miracle Wallahi', 'mythic', 8, 'miracle_wallahi.png'],
   ['wallahi_killer', 'Wallahi Killer', 'secret', 15, 'wallahi_killer.jpg'],
 ].map(([id, name, rarity, boostPercent, filename]) => ({

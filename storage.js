@@ -101,6 +101,7 @@ async function setMinigameChannel(guildId, channelId) {
     channelId,
     enabled: current ? Boolean(current.enabled) : true,
     nextSpawnAt: current?.nextSpawnAt || null,
+    nextWallahiId: current?.nextWallahiId || null,
   };
   await redis.set(minigameConfigKey(guildId), config);
   return config;
@@ -118,6 +119,14 @@ async function setNextSpawnAt(guildId, nextSpawnAt) {
   const current = await getMinigameConfig(guildId);
   if (!current) return null;
   const config = { ...current, nextSpawnAt };
+  await redis.set(minigameConfigKey(guildId), config);
+  return config;
+}
+
+async function setNextSpawnSchedule(guildId, nextSpawnAt, nextWallahiId) {
+  const current = await getMinigameConfig(guildId);
+  if (!current) return null;
+  const config = { ...current, nextSpawnAt, nextWallahiId };
   await redis.set(minigameConfigKey(guildId), config);
   return config;
 }
@@ -158,6 +167,7 @@ module.exports = {
   setMinigameChannel,
   setMinigameEnabled,
   setNextSpawnAt,
+  setNextSpawnSchedule,
   getActiveSpawn,
   setActiveSpawn,
   clearActiveSpawn,

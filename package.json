@@ -1,6 +1,6 @@
 {
   "name": "wallahisbot",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Bot Discord che traccia i 'Wallahi' dei membri del server",
   "main": "index.js",
   "type": "commonjs",

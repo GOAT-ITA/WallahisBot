@@ -10,7 +10,7 @@ const {
 } = require('discord.js');
 const { generateWallahiImage } = require('./imageGen');
 const { countLoseKeywords } = require('./wallahiText');
-const { RARITIES, WALLAHIS, getCollectionBoost } = require('./wallahiCatalog');
+const { RARITIES, WALLAHIS, getWallahiById, getCollectionBoost } = require('./wallahiCatalog');
 const {
   getWallahi,
   setWallahi,
@@ -29,6 +29,8 @@ const {
   setChannel,
   changeEnabled,
   spawnWallahi,
+  modifyScheduledSpawnTime,
+  despawnActiveWallahi,
   handleCatch,
 } = require('./minigame');
 
@@ -230,7 +232,7 @@ async function handleCommand(interaction) {
   const { commandName } = interaction;
   const guildId = interaction.guild.id;
 
-  if (['give', 'remove', 'set', 'add'].includes(commandName) && !isOwner(interaction)) {
+  if (['give', 'remove', 'set', 'add', 'despawn'].includes(commandName) && !isOwner(interaction)) {
     return denyUnauthorized(interaction);
   }
 
@@ -327,6 +329,16 @@ async function handleCommand(interaction) {
     });
   }
 
+  if (commandName === 'despawn') {
+    const result = await despawnActiveWallahi(client, guildId);
+    return interaction.reply({
+      content: result.error
+        ? result.error
+        : `**${result.wallahi?.name || 'The active Wallahi'}** has been despawned.`,
+      ephemeral: true,
+    });
+  }
+
   if (commandName === 'leaderboard') {
     const entries = (await getGuildLeaderboard(guildId)).sort((a, b) => b[1] - a[1]).slice(0, 5);
     if (entries.length === 0) return interaction.reply({ content: 'No one has earned any Wallahis yet.' });
@@ -364,7 +376,7 @@ async function handleCommand(interaction) {
     return interaction.reply({ embeds: [embed] });
   }
 
-  if (commandName === 'minigame') {
+  if (commandName === 'minigame' || commandName === 'minigame-test') {
     const subcommand = interaction.options.getSubcommand();
     if (subcommand === 'spawn') {
       if (!isOwner(interaction)) return denyUnauthorized(interaction);
@@ -377,6 +389,24 @@ async function handleCommand(interaction) {
       return interaction.editReply(
         result.error ? result.error : `${result.wallahi.name} was spawned without an @everyone mention.`
       );
+    }
+    if (subcommand === 'modify-time-spawn') {
+      if (!isOwner(interaction)) return denyUnauthorized(interaction);
+      const seconds = interaction.options.getInteger('seconds');
+      const result = await modifyScheduledSpawnTime(client, guildId, seconds);
+      if (result.error) {
+        return interaction.reply({ content: result.error, ephemeral: true });
+      }
+      const rarity = RARITIES[result.wallahi.rarity];
+      return interaction.reply({
+        content: [
+          'The next Wallahi spawn has been rescheduled.',
+          `**Wallahi:** ${result.wallahi.name}`,
+          `**Rarity:** ${rarity.name}`,
+          `**New spawn time:** <t:${Math.floor(result.nextSpawnAt / 1000)}:R>`,
+        ].join('\n'),
+        ephemeral: true,
+      });
     }
 
     if (!hasWallahiRole(interaction)) {
@@ -422,8 +452,15 @@ async function handleCommand(interaction) {
       const nextSpawn = config.enabled && config.nextSpawnAt
         ? `<t:${Math.floor(config.nextSpawnAt / 1000)}:R>`
         : 'Not scheduled';
+      const nextWallahi = config.enabled ? getWallahiById(config.nextWallahiId) : null;
       return interaction.reply({
-        content: `Status: **${config.enabled ? 'Active' : 'Disabled'}**\nChannel: <#${config.channelId}>\nNext spawn: ${nextSpawn}`,
+        content: [
+          `Status: **${config.enabled ? 'Active' : 'Disabled'}**`,
+          `Channel: <#${config.channelId}>`,
+          `Next spawn: ${nextSpawn}`,
+          `Next Wallahi: ${nextWallahi?.name || 'None'}`,
+          `Rarity: ${nextWallahi ? RARITIES[nextWallahi.rarity].name : 'None'}`,
+        ].join('\n'),
         ephemeral: true,
       });
     }
@@ -432,7 +469,7 @@ async function handleCommand(interaction) {
 
 client.on('interactionCreate', async (interaction) => {
   if (interaction.isAutocomplete()) {
-    if (interaction.commandName !== 'minigame') return;
+    if (!['minigame', 'minigame-test'].includes(interaction.commandName)) return;
     const focused = interaction.options.getFocused(true);
     if (focused.name !== 'wallahi') return;
     const selectedRarity = interaction.options.getString('rarity');

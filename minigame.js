@@ -8,23 +8,32 @@ const {
   EmbedBuilder,
   PermissionsBitField,
 } = require('discord.js');
-const { RARITIES, chooseRandomWallahi, getWallahiById } = require('./wallahiCatalog');
+const {
+  RARITIES,
+  WALLAHIS,
+  chooseRandomWallahi,
+  getWallahiById,
+  getCollectionBoost,
+} = require('./wallahiCatalog');
 const {
   ownsWallahi,
   addWallahiToCollection,
+  getCollection,
+  getBonusBoost,
   getMinigameConfig,
   setMinigameChannel,
   setMinigameEnabled,
   setNextSpawnAt,
+  setNextSpawnSchedule,
   getActiveSpawn,
   setActiveSpawn,
   clearActiveSpawn,
   claimSpawn,
 } = require('./storage');
 
-const MIN_SPAWN_DELAY_MS = 20 * 60 * 1000;
-const MAX_SPAWN_DELAY_MS = 40 * 60 * 1000;
-const SPAWN_LIFETIME_MS = 10 * 60 * 1000;
+const MIN_SPAWN_DELAY_MS = 11 * 60 * 1000;
+const MAX_SPAWN_DELAY_MS = 19 * 60 * 1000;
+const SPAWN_LIFETIME_MS = 5 * 60 * 1000;
 const timers = new Map();
 const expiryTimers = new Map();
 
@@ -48,20 +57,42 @@ function clearTimer(map, guildId) {
   map.delete(guildId);
 }
 
-async function disableSpawnMessage(client, spawn) {
+async function updateExpiredSpawnMessage(client, spawn) {
   try {
     const channel = await client.channels.fetch(spawn.channelId);
     const message = await channel.messages.fetch(spawn.messageId);
-    await message.edit({ components: [catchButton(spawn.guildId, spawn.id, true)] });
+    const wallahi = getWallahiById(spawn.wallahiId);
+    if (!wallahi) {
+      await message.edit({ components: [catchButton(spawn.guildId, spawn.id, true)] });
+      return;
+    }
+    const rarity = RARITIES[wallahi.rarity];
+    const embed = EmbedBuilder.from(message.embeds[0])
+      .setTitle('CATCH WALLAHIS — EXPIRED')
+      .setColor(0x2f3136)
+      .setFields(
+        { name: 'Name', value: wallahi.name, inline: true },
+        { name: 'Rarity', value: rarity.name, inline: true },
+        { name: 'XP Boost', value: `+${wallahi.boostPercent}%`, inline: true },
+        { name: 'Result', value: 'Nobody caught this Wallahi.' }
+      );
+    const filename = path.basename(wallahi.image);
+    embed.setImage(`attachment://${filename}`);
+    await message.edit({
+      embeds: [embed],
+      components: [catchButton(spawn.guildId, spawn.id, true)],
+      attachments: [],
+      files: [new AttachmentBuilder(wallahi.image, { name: filename })],
+    });
   } catch (error) {
-    console.error('Failed to disable an expired Wallahi spawn:', error);
+    console.error('Failed to update an expired Wallahi spawn:', error);
   }
 }
 
 async function expireSpawn(client, guildId, spawnId) {
   const spawn = await getActiveSpawn(guildId);
   if (!spawn || spawn.id !== spawnId) return;
-  await disableSpawnMessage(client, spawn);
+  await updateExpiredSpawnMessage(client, spawn);
   await clearActiveSpawn(guildId);
   clearTimer(expiryTimers, guildId);
 }
@@ -151,17 +182,19 @@ async function planNextSpawn(client, guildId, useSavedTime = false) {
   if (!config?.enabled || !config.channelId) return;
 
   let nextSpawnAt = useSavedTime ? Number(config.nextSpawnAt) : 0;
+  let nextWallahi = useSavedTime ? getWallahiById(config.nextWallahiId) : null;
   if (!nextSpawnAt || nextSpawnAt <= Date.now()) {
     nextSpawnAt = Date.now() + randomSpawnDelay();
-    await setNextSpawnAt(guildId, nextSpawnAt);
   }
+  if (!nextWallahi) nextWallahi = chooseRandomWallahi();
+  await setNextSpawnSchedule(guildId, nextSpawnAt, nextWallahi.id);
 
   timers.set(
     guildId,
     setTimeout(async () => {
       try {
         const guild = await client.guilds.fetch(guildId);
-        const result = await spawnWallahi(client, guild);
+        const result = await spawnWallahi(client, guild, { wallahiId: nextWallahi.id });
         if (result.error) console.error(`Automatic spawn skipped in guild ${guildId}: ${result.error}`);
       } catch (error) {
         console.error(`Automatic spawn failed in guild ${guildId}:`, error);
@@ -170,6 +203,35 @@ async function planNextSpawn(client, guildId, useSavedTime = false) {
       }
     }, Math.max(0, nextSpawnAt - Date.now()))
   );
+}
+
+async function modifyScheduledSpawnTime(client, guildId, seconds) {
+  const config = await getMinigameConfig(guildId);
+  if (!config?.channelId) return { error: 'No minigame channel has been configured.' };
+  if (!config.enabled) return { error: 'CATCH WALLAHIS is currently disabled.' };
+  const wallahi = getWallahiById(config.nextWallahiId);
+  if (!config.nextSpawnAt || !wallahi) {
+    return { error: 'There is no scheduled Wallahi spawn to modify.' };
+  }
+
+  const nextSpawnAt = Date.now() + seconds * 1000;
+  await setNextSpawnAt(guildId, nextSpawnAt);
+  await planNextSpawn(client, guildId, true);
+  return { wallahi, nextSpawnAt };
+}
+
+async function despawnActiveWallahi(client, guildId) {
+  const spawn = await getActiveSpawn(guildId);
+  if (!spawn) {
+    return { error: 'There is no active Wallahi available to despawn.' };
+  }
+  if (spawn.expiresAt <= Date.now()) {
+    await expireSpawn(client, guildId, spawn.id);
+    return { error: 'There is no active Wallahi available to despawn.' };
+  }
+  const wallahi = getWallahiById(spawn.wallahiId);
+  await expireSpawn(client, guildId, spawn.id);
+  return { wallahi };
 }
 
 async function initializeGuildMinigame(client, guild) {
@@ -233,9 +295,38 @@ async function handleCatch(interaction) {
     await addWallahiToCollection(guildId, interaction.user.id, wallahi.id);
     await clearActiveSpawn(guildId);
     clearTimer(expiryTimers, guildId);
-    await interaction.message.edit({ components: [catchButton(guildId, spawn.id, true)] });
+    const collection = await getCollection(guildId, interaction.user.id);
+    const collectionBoost = getCollectionBoost(collection);
+    const bonusBoost = await getBonusBoost(guildId, interaction.user.id);
+    const collectedCount = collection.filter((wallahiId) => getWallahiById(wallahiId)).length;
+    const rarity = RARITIES[wallahi.rarity];
+    const caughtEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+      .setTitle('CATCH WALLAHIS — CAUGHT')
+      .setFields(
+        { name: 'Name', value: wallahi.name, inline: true },
+        { name: 'Rarity', value: rarity.name, inline: true },
+        { name: 'XP Boost', value: `+${wallahi.boostPercent}%`, inline: true },
+        { name: 'Caught By', value: `${interaction.user}` }
+      );
+    const filename = path.basename(wallahi.image);
+    caughtEmbed.setImage(`attachment://${filename}`);
+    await interaction.message
+      .edit({
+        embeds: [caughtEmbed],
+        components: [catchButton(guildId, spawn.id, true)],
+        attachments: [],
+        files: [new AttachmentBuilder(wallahi.image, { name: filename })],
+      })
+      .catch((error) => console.error('Failed to update a caught Wallahi panel:', error));
     return interaction.reply({
-      content: `${interaction.user} caught **${wallahi.name}**!`,
+      content: [
+        `${interaction.user} caught **${wallahi.name}**!`,
+        `**Permanent boost earned:** +${wallahi.boostPercent}%`,
+        `**Collection boost:** +${collectionBoost}%`,
+        `**Additional boost:** +${bonusBoost}%`,
+        `**Total XP boost:** +${collectionBoost + bonusBoost}%`,
+        `**Collection progress:** ${collectedCount}/${WALLAHIS.length}`,
+      ].join('\n'),
       allowedMentions: { users: [interaction.user.id] },
     });
   } catch (error) {
@@ -253,6 +344,8 @@ module.exports = {
   initializeMinigames,
   initializeGuildMinigame,
   planNextSpawn,
+  modifyScheduledSpawnTime,
+  despawnActiveWallahi,
   setChannel,
   changeEnabled,
   spawnWallahi,

@@ -1,4 +1,4 @@
-# WallahisBot v1.1.0 🔥
+# WallahisBot v1.1.1 🔥
 
 Bot Discord che traccia livelli e XP Wallahi e include il minigioco CATCH WALLAHIS.
 

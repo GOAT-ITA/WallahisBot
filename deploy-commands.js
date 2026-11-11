@@ -85,6 +85,14 @@ const commands = [
         )
     ),
   new SlashCommandBuilder()
+    .setName('despawn')
+    .setDescription('Despawn an active minigame item')
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('wallahi')
+        .setDescription('Immediately expire the currently active Wallahi spawn')
+    ),
+  new SlashCommandBuilder()
     .setName('leaderboard')
     .setDescription('Show the top 5 players with the most Wallahis'),
   new SlashCommandBuilder()
@@ -116,6 +124,19 @@ const commands = [
     )
     .addSubcommand((subcommand) =>
       subcommand.setName('status').setDescription('Show the CATCH WALLAHIS configuration')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('modify-time-spawn')
+        .setDescription('Change the time remaining before the next scheduled Wallahi spawn')
+        .addIntegerOption((option) =>
+          option
+            .setName('seconds')
+            .setDescription('New time remaining in seconds')
+            .setMinValue(10)
+            .setMaxValue(86400)
+            .setRequired(true)
+        )
     )
     .addSubcommand((subcommand) =>
       subcommand
