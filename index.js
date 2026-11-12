@@ -391,7 +391,7 @@ async function handleCommand(interaction) {
         result.error ? result.error : `${result.wallahi.name} was spawned.`
       );
     }
-    if (subcommand === 'modify-time-spawn') {
+    if (subcommand === 'modifytimespawn') {
       if (!isOwner(interaction)) return denyUnauthorized(interaction);
       const seconds = interaction.options.getInteger('seconds');
       const result = await modifyScheduledSpawnTime(client, guildId, seconds);
@@ -409,7 +409,7 @@ async function handleCommand(interaction) {
         ephemeral: true,
       });
     }
-    if (subcommand === 'change-scheduled-wallahi') {
+    if (subcommand === 'changescheduledwallahi') {
       if (!isOwner(interaction)) return denyUnauthorized(interaction);
       const result = await changeScheduledWallahi(
         client,

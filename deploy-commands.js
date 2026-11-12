@@ -127,7 +127,7 @@ const commands = [
     )
     .addSubcommand((subcommand) =>
       subcommand
-        .setName('modify-time-spawn')
+        .setName('modifytimespawn')
         .setDescription('Change the time remaining before the next scheduled Wallahi spawn')
         .addIntegerOption((option) =>
           option
@@ -140,7 +140,7 @@ const commands = [
     )
     .addSubcommand((subcommand) =>
       subcommand
-        .setName('change-scheduled-wallahi')
+        .setName('changescheduledwallahi')
         .setDescription('Change the Wallahi selected for the next scheduled spawn')
         .addStringOption((option) =>
           option
