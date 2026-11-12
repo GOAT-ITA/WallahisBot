@@ -28,12 +28,13 @@ const {
   getActiveSpawn,
   setActiveSpawn,
   clearActiveSpawn,
+  clearActiveSpawnIfMatches,
   claimSpawn,
 } = require('./storage');
 
-const MIN_SPAWN_DELAY_MS = 5 * 60 * 1000;
+const MIN_SPAWN_DELAY_MS = 2 * 60 * 1000;
 const MAX_SPAWN_DELAY_MS = 15 * 60 * 1000;
-const SPAWN_LIFETIME_MS = 5 * 60 * 1000;
+const SPAWN_LIFETIME_MS = 2 * 60 * 1000;
 const timers = new Map();
 const expiryTimers = new Map();
 
@@ -55,6 +56,13 @@ function clearTimer(map, guildId) {
   const timer = map.get(guildId);
   if (timer) clearTimeout(timer);
   map.delete(guildId);
+}
+
+function clearExpiryTimer(guildId, spawnId = null) {
+  const entry = expiryTimers.get(guildId);
+  if (!entry || (spawnId && entry.spawnId !== spawnId)) return;
+  clearTimeout(entry.timer);
+  expiryTimers.delete(guildId);
 }
 
 async function updateExpiredSpawnMessage(client, spawn) {
@@ -93,16 +101,19 @@ async function expireSpawn(client, guildId, spawnId) {
   const spawn = await getActiveSpawn(guildId);
   if (!spawn || spawn.id !== spawnId) return;
   await updateExpiredSpawnMessage(client, spawn);
-  await clearActiveSpawn(guildId);
-  clearTimer(expiryTimers, guildId);
+  const cleared = await clearActiveSpawnIfMatches(guildId, spawnId);
+  if (cleared) clearExpiryTimer(guildId, spawnId);
 }
 
 function scheduleExpiry(client, spawn) {
-  clearTimer(expiryTimers, spawn.guildId);
+  clearExpiryTimer(spawn.guildId);
   const delay = Math.max(0, spawn.expiresAt - Date.now());
   expiryTimers.set(
     spawn.guildId,
-    setTimeout(() => expireSpawn(client, spawn.guildId, spawn.id).catch(console.error), delay)
+    {
+      spawnId: spawn.id,
+      timer: setTimeout(() => expireSpawn(client, spawn.guildId, spawn.id).catch(console.error), delay),
+    }
   );
 }
 
@@ -144,7 +155,7 @@ async function spawnWallahi(client, guild, options = {}) {
   const spawnId = crypto.randomUUID();
   const filename = path.basename(wallahi.image);
   const article = rarity.name === 'Epic' ? 'An' : 'A';
-  const shouldNotifyEveryone = ['mythic', 'secret'].includes(wallahi.rarity);
+  const shouldNotifyEveryone = !options.forced && ['mythic', 'secret'].includes(wallahi.rarity);
   const content = `${shouldNotifyEveryone ? '@everyone ' : ''}${article} ${rarity.name} Wallahi has spawned!`;
   const embed = new EmbedBuilder()
     .setTitle('CATCH WALLAHIS')
@@ -320,8 +331,8 @@ async function handleCatch(interaction) {
     }
 
     await addWallahiToCollection(guildId, interaction.user.id, wallahi.id);
-    await clearActiveSpawn(guildId);
-    clearTimer(expiryTimers, guildId);
+    await clearActiveSpawnIfMatches(guildId, spawn.id);
+    clearExpiryTimer(guildId, spawn.id);
     const collection = await getCollection(guildId, interaction.user.id);
     const collectionBoost = getCollectionBoost(collection);
     const bonusBoost = await getBonusBoost(guildId, interaction.user.id);

@@ -76,6 +76,10 @@ async function addWallahiToCollection(guildId, userId, wallahiId) {
   return redis.sadd(collectionKey(guildId, userId), wallahiId);
 }
 
+async function removeWallahiFromCollection(guildId, userId, wallahiId) {
+  return redis.srem(collectionKey(guildId, userId), wallahiId);
+}
+
 async function getBonusBoost(guildId, userId) {
   const value = await redis.get(bonusBoostKey(guildId, userId));
   return value === null || value === undefined ? 0 : Number(value) || 0;
@@ -143,6 +147,17 @@ async function clearActiveSpawn(guildId) {
   await redis.del(activeSpawnKey(guildId));
 }
 
+async function clearActiveSpawnIfMatches(guildId, spawnId) {
+  const script = `
+    local value = redis.call('GET', KEYS[1])
+    if not value then return 0 end
+    local ok, spawn = pcall(cjson.decode, value)
+    if not ok or spawn['id'] ~= ARGV[1] then return 0 end
+    return redis.call('DEL', KEYS[1])
+  `;
+  return Number(await redis.eval(script, [activeSpawnKey(guildId)], [spawnId])) === 1;
+}
+
 async function claimSpawn(guildId, spawnId, userId, ttlSeconds) {
   const result = await redis.set(spawnClaimKey(guildId, spawnId), userId, {
     nx: true,
@@ -161,6 +176,7 @@ module.exports = {
   getCollection,
   ownsWallahi,
   addWallahiToCollection,
+  removeWallahiFromCollection,
   getBonusBoost,
   setBonusBoost,
   getMinigameConfig,
@@ -171,5 +187,6 @@ module.exports = {
   getActiveSpawn,
   setActiveSpawn,
   clearActiveSpawn,
+  clearActiveSpawnIfMatches,
   claimSpawn,
 };

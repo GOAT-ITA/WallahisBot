@@ -19,6 +19,7 @@ const {
   setXp,
   getGuildLeaderboard,
   getCollection,
+  removeWallahiFromCollection,
   getBonusBoost,
   setBonusBoost,
   getMinigameConfig,
@@ -391,6 +392,63 @@ async function handleCommand(interaction) {
         result.error ? result.error : `${result.wallahi.name} was spawned.`
       );
     }
+    if (subcommand === 'removewallahi') {
+      if (!isOwner(interaction)) return denyUnauthorized(interaction);
+      const target = interaction.options.getUser('user');
+      const wallahiId = interaction.options.getString('wallahi');
+      const wallahi = getWallahiById(wallahiId);
+      const collection = await getCollection(guildId, target.id);
+      if (!wallahi || !collection.includes(wallahiId)) {
+        return interaction.reply({
+          content: `${target} does not own the selected Wallahi.`,
+          ephemeral: true,
+        });
+      }
+      const removed = await removeWallahiFromCollection(guildId, target.id, wallahiId);
+      if (!removed) {
+        return interaction.reply({
+          content: 'The Wallahi could not be removed because it is no longer in that collection.',
+          ephemeral: true,
+        });
+      }
+      const updatedCollection = await getCollection(guildId, target.id);
+      const updatedBoost = getCollectionBoost(updatedCollection);
+      return interaction.reply({
+        content: [
+          `**${wallahi.name}** was removed from ${target}'s collection.`,
+          `**Updated collection boost:** +${formatNumber(updatedBoost)}%`,
+          `**Collection progress:** ${updatedCollection.length}/${WALLAHIS.length}`,
+        ].join('\n'),
+      });
+    }
+    if (subcommand === 'showyourwallahi') {
+      const wallahiId = interaction.options.getString('wallahi');
+      const collection = await getCollection(guildId, interaction.user.id);
+      const wallahi = getWallahiById(wallahiId);
+      if (!wallahi || !collection.includes(wallahiId)) {
+        return interaction.reply({
+          content: 'You do not own the selected Wallahi.',
+          ephemeral: true,
+        });
+      }
+      const rarity = RARITIES[wallahi.rarity];
+      const filename = path.basename(wallahi.image);
+      const embed = new EmbedBuilder()
+        .setTitle(`${interaction.user.username}'s Wallahi Showcase`)
+        .setColor(rarity.color)
+        .addFields(
+          { name: 'Name', value: wallahi.name, inline: true },
+          { name: 'Rarity', value: rarity.name, inline: true },
+          { name: 'XP Boost', value: `+${wallahi.boostPercent}%`, inline: true },
+          { name: 'Owner', value: `${interaction.user}` }
+        )
+        .setImage(`attachment://${filename}`);
+      return interaction.reply({
+        embeds: [embed],
+        files: [new AttachmentBuilder(wallahi.image, { name: filename })],
+        allowedMentions: { users: [] },
+      });
+    }
     if (subcommand === 'modifytimespawn') {
       if (!isOwner(interaction)) return denyUnauthorized(interaction);
       const seconds = interaction.options.getInteger('seconds');
@@ -496,13 +554,25 @@ client.on('interactionCreate', async (interaction) => {
     if (!['minigame', 'minigame-test'].includes(interaction.commandName)) return;
     const focused = interaction.options.getFocused(true);
     if (focused.name !== 'wallahi') return;
-    const selectedRarity = interaction.options.getString('rarity');
+    const subcommand = interaction.options.getSubcommand();
     const query = focused.value.toLowerCase();
-    const choices = WALLAHIS.filter(
-      (wallahi) =>
-        (!selectedRarity || wallahi.rarity === selectedRarity) &&
-        wallahi.name.toLowerCase().includes(query)
-    )
+    let candidates = WALLAHIS;
+    if (subcommand === 'removewallahi') {
+      if (!isOwner(interaction)) return interaction.respond([]);
+      const target = interaction.options.getUser('user');
+      if (!target) return interaction.respond([]);
+      const collection = new Set(await getCollection(interaction.guildId, target.id));
+      candidates = WALLAHIS.filter((wallahi) => collection.has(wallahi.id));
+    } else if (subcommand === 'showyourwallahi') {
+      const collection = new Set(await getCollection(interaction.guildId, interaction.user.id));
+      candidates = WALLAHIS.filter((wallahi) => collection.has(wallahi.id));
+    } else {
+      const selectedRarity = interaction.options.getString('rarity');
+      candidates = WALLAHIS.filter(
+        (wallahi) => !selectedRarity || wallahi.rarity === selectedRarity
+      );
+    }
+    const choices = candidates.filter((wallahi) => wallahi.name.toLowerCase().includes(query))
       .slice(0, 25)
       .map((wallahi) => ({ name: wallahi.name, value: wallahi.id }));
     return interaction.respond(choices).catch((error) => {

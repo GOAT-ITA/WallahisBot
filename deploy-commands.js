@@ -160,7 +160,7 @@ const commands = [
     .addSubcommand((subcommand) =>
       subcommand
         .setName('spawn')
-        .setDescription('Force a Wallahi spawn for testing')
+        .setDescription('Force a Wallahi spawn without mentioning everyone')
         .addStringOption((option) =>
           option
             .setName('rarity')
@@ -172,6 +172,33 @@ const commands = [
             .setName('wallahi')
             .setDescription('Force a specific Wallahi')
             .setAutocomplete(true)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('removewallahi')
+        .setDescription("Remove a Wallahi from a player's collection")
+        .addUserOption((option) =>
+          option.setName('user').setDescription('Player whose Wallahi will be removed').setRequired(true)
+        )
+        .addStringOption((option) =>
+          option
+            .setName('wallahi')
+            .setDescription('Owned Wallahi to remove')
+            .setAutocomplete(true)
+            .setRequired(true)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('showyourwallahi')
+        .setDescription('Showcase one of your collected Wallahis')
+        .addStringOption((option) =>
+          option
+            .setName('wallahi')
+            .setDescription('Wallahi to showcase')
+            .setAutocomplete(true)
+            .setRequired(true)
         )
     ),
 ].map((command) => command.toJSON());
