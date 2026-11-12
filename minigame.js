@@ -31,8 +31,8 @@ const {
   claimSpawn,
 } = require('./storage');
 
-const MIN_SPAWN_DELAY_MS = 11 * 60 * 1000;
-const MAX_SPAWN_DELAY_MS = 19 * 60 * 1000;
+const MIN_SPAWN_DELAY_MS = 5 * 60 * 1000;
+const MAX_SPAWN_DELAY_MS = 15 * 60 * 1000;
 const SPAWN_LIFETIME_MS = 5 * 60 * 1000;
 const timers = new Map();
 const expiryTimers = new Map();
@@ -129,9 +129,10 @@ async function spawnWallahi(client, guild, options = {}) {
 
   const existing = await getActiveSpawn(guild.id);
   if (existing && existing.expiresAt > Date.now()) {
-    return { error: 'A Wallahi is already waiting to be caught.' };
+    await expireSpawn(client, guild.id, existing.id);
+  } else if (existing) {
+    await clearActiveSpawn(guild.id);
   }
-  if (existing) await clearActiveSpawn(guild.id);
 
   const channel = await guild.channels.fetch(config.channelId).catch(() => null);
   const channelError = await validateSpawnChannel(guild, channel);
