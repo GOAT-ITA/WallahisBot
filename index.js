@@ -30,6 +30,7 @@ const {
   changeEnabled,
   spawnWallahi,
   modifyScheduledSpawnTime,
+  changeScheduledWallahi,
   despawnActiveWallahi,
   handleCatch,
 } = require('./minigame');
@@ -387,7 +388,7 @@ async function handleCommand(interaction) {
         wallahiId: interaction.options.getString('wallahi'),
       });
       return interaction.editReply(
-        result.error ? result.error : `${result.wallahi.name} was spawned without an @everyone mention.`
+        result.error ? result.error : `${result.wallahi.name} was spawned.`
       );
     }
     if (subcommand === 'modify-time-spawn') {
@@ -404,6 +405,29 @@ async function handleCommand(interaction) {
           `**Wallahi:** ${result.wallahi.name}`,
           `**Rarity:** ${rarity.name}`,
           `**New spawn time:** <t:${Math.floor(result.nextSpawnAt / 1000)}:R>`,
+        ].join('\n'),
+        ephemeral: true,
+      });
+    }
+    if (subcommand === 'change-scheduled-wallahi') {
+      if (!isOwner(interaction)) return denyUnauthorized(interaction);
+      const result = await changeScheduledWallahi(
+        client,
+        guildId,
+        interaction.options.getString('rarity'),
+        interaction.options.getString('wallahi')
+      );
+      if (result.error) {
+        return interaction.reply({ content: result.error, ephemeral: true });
+      }
+      const rarity = RARITIES[result.nextWallahi.rarity];
+      return interaction.reply({
+        content: [
+          'The next scheduled Wallahi has been changed.',
+          `**Previous Wallahi:** ${result.previousWallahi?.name || 'Unknown'}`,
+          `**New Wallahi:** ${result.nextWallahi.name}`,
+          `**Rarity:** ${rarity.name}`,
+          `**Spawn time:** <t:${Math.floor(result.nextSpawnAt / 1000)}:R>`,
         ].join('\n'),
         ephemeral: true,
       });

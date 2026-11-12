@@ -143,7 +143,7 @@ async function spawnWallahi(client, guild, options = {}) {
   const spawnId = crypto.randomUUID();
   const filename = path.basename(wallahi.image);
   const article = rarity.name === 'Epic' ? 'An' : 'A';
-  const shouldNotifyEveryone = !options.forced && ['mythic', 'secret'].includes(wallahi.rarity);
+  const shouldNotifyEveryone = ['mythic', 'secret'].includes(wallahi.rarity);
   const content = `${shouldNotifyEveryone ? '@everyone ' : ''}${article} ${rarity.name} Wallahi has spawned!`;
   const embed = new EmbedBuilder()
     .setTitle('CATCH WALLAHIS')
@@ -218,6 +218,32 @@ async function modifyScheduledSpawnTime(client, guildId, seconds) {
   await setNextSpawnAt(guildId, nextSpawnAt);
   await planNextSpawn(client, guildId, true);
   return { wallahi, nextSpawnAt };
+}
+
+async function changeScheduledWallahi(client, guildId, rarityId, wallahiId) {
+  const config = await getMinigameConfig(guildId);
+  if (!config?.channelId) return { error: 'No minigame channel has been configured.' };
+  if (!config.enabled) return { error: 'CATCH WALLAHIS is currently disabled.' };
+  if (!config.nextSpawnAt || !config.nextWallahiId) {
+    return { error: 'There is no scheduled Wallahi spawn to modify.' };
+  }
+
+  const previousWallahi = getWallahiById(config.nextWallahiId);
+  const nextWallahi = getWallahiById(wallahiId);
+  if (!nextWallahi || nextWallahi.rarity !== rarityId) {
+    return { error: 'The selected Wallahi could not be found.' };
+  }
+  if (previousWallahi?.id === nextWallahi.id) {
+    return { error: 'This Wallahi is already selected for the next spawn.' };
+  }
+
+  await setNextSpawnSchedule(guildId, config.nextSpawnAt, nextWallahi.id);
+  await planNextSpawn(client, guildId, true);
+  return {
+    previousWallahi,
+    nextWallahi,
+    nextSpawnAt: Number(config.nextSpawnAt),
+  };
 }
 
 async function despawnActiveWallahi(client, guildId) {
@@ -345,6 +371,7 @@ module.exports = {
   initializeGuildMinigame,
   planNextSpawn,
   modifyScheduledSpawnTime,
+  changeScheduledWallahi,
   despawnActiveWallahi,
   setChannel,
   changeEnabled,

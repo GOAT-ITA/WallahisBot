@@ -140,6 +140,25 @@ const commands = [
     )
     .addSubcommand((subcommand) =>
       subcommand
+        .setName('change-scheduled-wallahi')
+        .setDescription('Change the Wallahi selected for the next scheduled spawn')
+        .addStringOption((option) =>
+          option
+            .setName('rarity')
+            .setDescription('Rarity of the replacement Wallahi')
+            .addChoices(...rarityChoices)
+            .setRequired(true)
+        )
+        .addStringOption((option) =>
+          option
+            .setName('wallahi')
+            .setDescription('Replacement Wallahi')
+            .setAutocomplete(true)
+            .setRequired(true)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName('spawn')
         .setDescription('Force a Wallahi spawn for testing')
         .addStringOption((option) =>
