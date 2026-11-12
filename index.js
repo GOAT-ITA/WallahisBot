@@ -559,9 +559,10 @@ client.on('interactionCreate', async (interaction) => {
     let candidates = WALLAHIS;
     if (subcommand === 'removewallahi') {
       if (!isOwner(interaction)) return interaction.respond([]);
-      const target = interaction.options.getUser('user');
-      if (!target) return interaction.respond([]);
-      const collection = new Set(await getCollection(interaction.guildId, target.id));
+      const targetOption = interaction.options.get('user');
+      const targetId = targetOption?.user?.id || targetOption?.value;
+      if (!targetId) return interaction.respond([]);
+      const collection = new Set(await getCollection(interaction.guildId, targetId));
       candidates = WALLAHIS.filter((wallahi) => collection.has(wallahi.id));
     } else if (subcommand === 'showyourwallahi') {
       const collection = new Set(await getCollection(interaction.guildId, interaction.user.id));
